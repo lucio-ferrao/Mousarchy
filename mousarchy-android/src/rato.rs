@@ -3,9 +3,13 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 // Tipos de evento do uhid (linux/uhid.h).
 const UHID_DESTROY: u32 = 1;
+const UHID_OPEN: u32 = 4;
+const UHID_CLOSE: u32 = 5;
 const UHID_CREATE2: u32 = 11;
 const UHID_INPUT2: u32 = 12;
 
@@ -117,7 +121,12 @@ pub const RELATORIO_TECLADO: usize = 8;
 /// Botões (1), X (2), Y (2), roda (1), roda horizontal (1).
 pub const RELATORIO_RATO: usize = 7;
 
-pub struct Uhid(File);
+/// Um aparelho HID virtual; desaparece do Android quando é largado.
+pub struct Uhid {
+    ficheiro: File,
+    /// Se o Android já abriu o aparelho (o kernel avisa com OPEN e CLOSE).
+    aberto: Arc<(Mutex<bool>, Condvar)>,
+}
 
 impl Uhid {
     pub fn criar(nome: &str, produto: u32, descritor: &[u8]) -> std::io::Result<Self> {
@@ -135,13 +144,31 @@ impl Uhid {
         ev[o..o + descritor.len()].copy_from_slice(descritor);
         f.write_all(&ev)?;
 
-        // O kernel manda START, OPEN, OUTPUT…: lê-se e ignora-se, para a fila não encher.
+        // O kernel manda START, OPEN, CLOSE, OUTPUT…: só interessa saber se o Android o abriu, o
+        // resto lê-se e ignora-se, para a fila não encher.
         let mut leitor = f.try_clone()?;
+        let aberto = Arc::new((Mutex::new(false), Condvar::new()));
+        let aviso = Arc::clone(&aberto);
         std::thread::spawn(move || {
             let mut buf = vec![0u8; EVENTO];
-            while leitor.read(&mut buf).map(|n| n > 0).unwrap_or(false) {}
+            while let Ok(n) = leitor.read(&mut buf) {
+                if n < 4 {
+                    break;
+                }
+                let tipo = u32::from_ne_bytes(buf[..4].try_into().unwrap());
+                if tipo == UHID_OPEN || tipo == UHID_CLOSE {
+                    *aviso.0.lock().unwrap() = tipo == UHID_OPEN;
+                    aviso.1.notify_all();
+                }
+            }
         });
-        Ok(Uhid(f))
+        Ok(Uhid { ficheiro: f, aberto })
+    }
+
+    /// Espera (até `limite`) que o Android abra o aparelho: o que se escreve antes perde-se.
+    pub fn esperar_aberto(&self, limite: Duration) {
+        let aberto = self.aberto.0.lock().unwrap();
+        let _ = self.aberto.1.wait_timeout_while(aberto, limite, |a| !*a);
     }
 
     pub fn enviar(&mut self, relatorio: &[u8]) -> std::io::Result<()> {
@@ -149,12 +176,12 @@ impl Uhid {
         ev[0..4].copy_from_slice(&UHID_INPUT2.to_ne_bytes());
         ev[4..6].copy_from_slice(&(relatorio.len() as u16).to_ne_bytes());
         ev[6..6 + relatorio.len()].copy_from_slice(relatorio);
-        self.0.write_all(&ev[..6 + relatorio.len()])
+        self.ficheiro.write_all(&ev[..6 + relatorio.len()])
     }
 }
 
 impl Drop for Uhid {
     fn drop(&mut self) {
-        let _ = self.0.write_all(&UHID_DESTROY.to_ne_bytes());
+        let _ = self.ficheiro.write_all(&UHID_DESTROY.to_ne_bytes());
     }
 }

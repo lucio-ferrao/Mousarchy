@@ -21,7 +21,6 @@ const CHAVES: &str = "/data/local/tmp/mousarchy/chaves";
 pub const PID: &str = "/data/local/tmp/mousarchy/pid";
 
 struct Estado {
-    rato: Mutex<Uhid>,
     /// O código que o Keyarchy recebeu do PC; vale para uma só tentativa.
     codigo: Mutex<Option<String>>,
 }
@@ -29,7 +28,6 @@ struct Estado {
 pub fn servir(codigo: Option<String>) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(CHAVES)?;
     let estado = Arc::new(Estado {
-        rato: Mutex::new(Uhid::criar(NOME, 0x7a01, DESCRITOR_RATO)?),
         codigo: Mutex::new(codigo),
     });
     let escuta = TcpListener::bind(("0.0.0.0", p::PORTA))?;
@@ -67,7 +65,7 @@ fn atender(mut ligacao: TcpStream, estado: &Estado) -> io::Result<()> {
             let sessao = handshake(&mut ligacao, &chave)?;
             ligacao.set_read_timeout(None)?;
             eprintln!("sessão com {}", ligacao.peer_addr()?);
-            sessao_do_rato(ligacao, sessao, estado)
+            sessao_do_rato(ligacao, sessao)
         }
         m => Err(io::Error::other(format!("modo desconhecido {m}"))),
     }
@@ -104,9 +102,6 @@ fn caminho_da_chave(id: &[u8; 8]) -> PathBuf {
 fn ler_chave(caminho: &Path) -> Option<Chave> {
     fs::read(caminho).ok()?.try_into().ok()
 }
-
-/// A tecla F24 no HID.
-const F24: u8 = 0x73;
 
 /// Fixa no teclado `nome` a disposição Android da disposição xkb do PC, pela classe
 /// `MousarchyLayout` do APK do Keyarchy (de onde este binário vem), corrida como `shell`.
@@ -166,7 +161,7 @@ fn scroll_invertido_no_android() -> bool {
     saida.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
 }
 
-fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, estado: &Estado) -> io::Result<()> {
+fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Result<()> {
     let (w, h) = tamanho_ecra();
     let mut ola = vec![p::telemovel::OLA];
     ola.extend_from_slice(&w.to_le_bytes());
@@ -184,6 +179,9 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, estado: &E
     let mut teclado = Uhid::criar(&nome_do_teclado, 0x7a02, DESCRITOR_TECLADO)?;
     let mut navegacao = Uhid::criar(&format!("{NOME} navegação"), 0x7a03, DESCRITOR_NAVEGACAO)?;
     let mut borda: Option<Arc<Borda>> = None;
+    // O rato só existe enquanto está no telemóvel: ao largá-lo, o Android tira logo o ponteiro
+    // do ecrã (sem rato, esperaria uns segundos de inatividade).
+    let mut rato: Option<Uhid> = None;
     let resultado = loop {
         let msg = match p::ler_trama(&mut ligacao).and_then(|t| p::decifrar(&mut sessao, &t)) {
             Ok(m) => m,
@@ -202,9 +200,7 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, estado: &E
                 if para_a_borda && relatorio[0] == 0 && b.encostado.load(Ordering::SeqCst) {
                     b.afastou();
                     p::escrever_trama(&mut ligacao, &p::cifrar(&mut sessao, &[p::telemovel::SAIU])?)?;
-                    // Uma tecla de um teclado físico esconde o ponteiro; F24 não faz nada nas apps.
-                    teclado.enviar(&[0, 0, F24, 0, 0, 0, 0, 0])?;
-                    teclado.enviar(&[0; RELATORIO_TECLADO])?;
+                    rato = None;
                     continue;
                 }
                 if para_a_borda {
@@ -212,7 +208,9 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, estado: &E
                 } else if b.para_dentro(dx, dy) {
                     b.afastou();
                 }
-                estado.rato.lock().unwrap().enviar(&relatorio)?;
+                if let Some(r) = rato.as_mut() {
+                    r.enviar(&relatorio)?;
+                }
             }
             (Some(p::pc::DISPOSICAO), _) => {
                 let xkb = String::from_utf8_lossy(&msg[1..]).into_owned();
@@ -222,18 +220,20 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, estado: &E
             (Some(p::pc::TECLADO), _) if msg.len() == 1 + RELATORIO_TECLADO => teclado.enviar(&msg[1..])?,
             (Some(p::pc::NAVEGACAO), _) if msg.len() == 2 => navegacao.enviar(&msg[1..])?,
             (Some(p::pc::ENTRAR), Some(b)) => {
+                let mut novo = Uhid::criar(NOME, 0x7a01, DESCRITOR_RATO)?;
+                novo.esperar_aberto(Duration::from_millis(500));
                 let (dx, dy) = b.encostar();
                 let mut r = [0u8; RELATORIO_RATO];
                 r[1..3].copy_from_slice(&dx.to_le_bytes());
                 r[3..5].copy_from_slice(&dy.to_le_bytes());
-                estado.rato.lock().unwrap().enviar(&r)?;
+                novo.enviar(&r)?;
+                rato = Some(novo);
                 b.afastou();
             }
             _ => break Err(io::Error::other("mensagem inesperada")),
         }
     };
-    // Larga qualquer botão ou tecla que tenha ficado premido.
-    let _ = estado.rato.lock().unwrap().enviar(&[0; RELATORIO_RATO]);
+    // Larga qualquer tecla que tenha ficado premida (o rato desaparece com a sessão).
     let _ = teclado.enviar(&[0; RELATORIO_TECLADO]);
     let _ = navegacao.enviar(&[0]);
     resultado
