@@ -1,0 +1,7 @@
+[workspace]
+members = ["mousarchy-android", "mousarchy", "mousarchy-protocolo"]
+resolver = "2"
+
+# A captura do lan-mouse (GPL-3) com o filtro por monitor (`restrict_to_output_at`).
+[patch.crates-io]
+input-capture = { path = "input-capture" }

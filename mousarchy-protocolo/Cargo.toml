@@ -1,0 +1,11 @@
+[package]
+name = "mousarchy-protocolo"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+blake2 = "0.10"
+getrandom = "0.3"
+snow = "0.10"
+spake2 = "0.4"

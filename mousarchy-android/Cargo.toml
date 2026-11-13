@@ -1,0 +1,11 @@
+[package]
+name = "mousarchy-android"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+futures = "0.3.34"
+libadb = { version = "0.9", features = ["pairing", "tokio"] }
+mousarchy-protocolo = { version = "0.1.0", path = "../mousarchy-protocolo" }
+tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util"] }
