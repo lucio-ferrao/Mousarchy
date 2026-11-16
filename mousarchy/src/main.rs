@@ -5,7 +5,12 @@
 //! `mousarchy [direita|esquerda|cima|baixo] [MONITOR]` (direita por omissão) é o lado do
 //! telemóvel; com o nome de um monitor (DP-1…), só a borda desse monitor passa o rato.
 
+#[cfg(target_os = "linux")]
 mod disposicao;
+#[cfg(windows)]
+#[path = "disposicao_windows.rs"]
+mod disposicao;
+#[cfg(target_os = "linux")]
 mod monitores;
 mod rede;
 mod teclado;
@@ -154,6 +159,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("baixo") => Position::Bottom,
         Some(outro) => return Err(format!("não conheço {outro}: emparelhar, direita, esquerda, cima ou baixo").into()),
     };
+    #[cfg(windows)]
+    if args.get(1).is_some() {
+        return Err("no Windows não se escolhe o monitor: a borda é a do ecrã todo".into());
+    }
+    #[cfg(target_os = "linux")]
     if let Some(nome) = args.get(1) {
         let monitores = monitores::monitores()?;
         let Some((_, (x, y))) = monitores.iter().find(|(n, _)| n == nome) else {
