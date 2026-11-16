@@ -12,7 +12,7 @@ use std::time::Duration;
 use mousarchy_protocolo::{self as p, Chave, TransportState};
 
 use crate::NOME;
-use crate::borda::{Borda, tamanho_ecra};
+use crate::borda::{Borda, posicao_ponteiro, tamanho_ecra};
 use crate::rato::{DESCRITOR_NAVEGACAO, DESCRITOR_RATO, DESCRITOR_TECLADO, RELATORIO_RATO, RELATORIO_TECLADO, Uhid};
 
 /// As chaves dos PCs emparelhados, uma por ficheiro com o nome do seu id.
@@ -69,6 +69,31 @@ fn atender(mut ligacao: TcpStream, estado: &Estado) -> io::Result<()> {
         }
         m => Err(io::Error::other(format!("modo desconhecido {m}"))),
     }
+}
+
+/// O ganho do Android para um movimento do rato isolado, sem aceleração (píxeis por unidade).
+const GANHO_BASE: f32 = 3.06;
+
+/// Leva o ponteiro, já encostado à borda [lado], até à [fracao] dela: o Android acelera o rato,
+/// por isso move-se aos poucos, vendo onde ficou (`dumpsys input`) e corrigindo, com pausas para o
+/// movimento seguinte não contar como rápido.
+fn ao_longo_da_borda(rato: &mut Uhid, lado: u8, fracao: f32, (w, h): (u16, u16)) -> io::Result<()> {
+    let lateral = matches!(lado, p::borda::ESQUERDA | p::borda::DIREITA);
+    let alvo = fracao * f32::from(if lateral { h } else { w });
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(80));
+        let Some((x, y)) = posicao_ponteiro() else { return Ok(()) };
+        let falta = alvo - if lateral { y } else { x };
+        if falta.abs() < 4.0 {
+            break;
+        }
+        let unidades = (falta / GANHO_BASE).round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+        let mut r = [0u8; RELATORIO_RATO];
+        let campo = if lateral { 3..5 } else { 1..3 };
+        r[campo].copy_from_slice(&unidades.to_le_bytes());
+        rato.enviar(&r)?;
+    }
+    Ok(())
 }
 
 /// SPAKE2 com o código e confirmação pelo handshake; se passar, a chave fica guardada.
@@ -227,6 +252,10 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Res
                 r[1..3].copy_from_slice(&dx.to_le_bytes());
                 r[3..5].copy_from_slice(&dy.to_le_bytes());
                 novo.enviar(&r)?;
+                if msg.len() == 3 {
+                    let fracao = f32::from(u16::from_le_bytes([msg[1], msg[2]])) / f32::from(u16::MAX);
+                    ao_longo_da_borda(&mut novo, b.lado, fracao, (w, h))?;
+                }
                 rato = Some(novo);
                 b.afastou();
             }

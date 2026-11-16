@@ -21,6 +21,20 @@ pub fn restrict_to_output_at(x: i32, y: i32) {
     let _ = OUTPUT_FILTER.set((x, y));
 }
 
+/// Where the pointer last crossed into a capture, in the compositor's logical coordinates, when the
+/// backend is told (libei, by the portal's activation).
+static ENTRY_POSITION: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// Where the pointer last crossed into a capture (see [`ENTRY_POSITION`]), if known.
+pub fn entry_position() -> Option<(f64, f64)> {
+    *ENTRY_POSITION.lock().unwrap()
+}
+
+#[allow(dead_code)] // set by the libei backend only
+fn set_entry_position(position: Option<(f64, f64)>) {
+    *ENTRY_POSITION.lock().unwrap() = position;
+}
+
 fn output_allowed(x: i32, y: i32) -> bool {
     OUTPUT_FILTER.get().is_none_or(|&f| f == (x, y))
 }

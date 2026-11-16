@@ -10,6 +10,8 @@ mod disposicao;
 #[cfg(windows)]
 #[path = "disposicao_windows.rs"]
 mod disposicao;
+mod cursor;
+mod entrada;
 #[cfg(target_os = "linux")]
 mod monitores;
 mod rede;
@@ -142,6 +144,7 @@ async fn largar(captura: &mut InputCapture, envio: &mut Envio, rato: &mut Rato, 
         let _ = envio.mandar(&[p::pc::NAVEGACAO, 0]).await;
     }
     let _ = envio.mandar(&teclado.largar()).await;
+    cursor::mostrar();
     if let Err(e) = captura.release().await {
         log::warn!("não larguei a captura: {e}");
     }
@@ -166,8 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     if let Some(nome) = args.get(1) {
         let monitores = monitores::monitores()?;
-        let Some((_, (x, y))) = monitores.iter().find(|(n, _)| n == nome) else {
-            let nomes: Vec<&str> = monitores.iter().map(|(n, _)| n.as_str()).collect();
+        let Some(monitores::Monitor { posicao: (x, y), .. }) = monitores.iter().find(|m| &m.nome == nome) else {
+            let nomes: Vec<&str> = monitores.iter().map(|m| m.nome.as_str()).collect();
             return Err(format!("não há o monitor {nome}; há {}", nomes.join(", ")).into());
         };
         input_capture::restrict_to_output_at(*x, *y);
@@ -175,6 +178,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chave = rede::ler_chave()?;
     let disposicao = disposicao::disposicao().unwrap_or_default();
     log::info!("disposição do teclado: {disposicao}");
+    // Ctrl+C com o rato no telemóvel não pode deixar o cursor do PC escondido.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cursor::mostrar();
+            std::process::exit(130);
+        }
+    });
     // A captura do lan-mouse lança tarefas locais (`spawn_local`).
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -252,7 +262,13 @@ async fn sessao_do_rato(
                     (_, CaptureEvent::Begin) => {
                         dentro = true;
                         log::info!("rato no telemóvel");
-                        envio.mandar(&[p::pc::ENTRAR]).await
+                        cursor::esconder();
+                        // onde passou a borda, para o ponteiro aparecer no mesmo sítio dela no telemóvel
+                        let mut m = vec![p::pc::ENTRAR];
+                        if let Some(fracao) = entrada::fracao_na_borda(lado) {
+                            m.extend_from_slice(&((fracao * f64::from(u16::MAX)).round() as u16).to_le_bytes());
+                        }
+                        envio.mandar(&m).await
                     }
                     (_, CaptureEvent::Input(Event::Pointer(ev))) if dentro => match rato.traduzir(ev) {
                         Some(m) => envio.mandar(&m).await,
@@ -289,6 +305,7 @@ async fn sessao_do_rato(
         }
     };
     if dentro {
+        cursor::mostrar();
         let _ = captura.release().await;
     }
     // Sem telemóvel, a borda deixa de prender o rato.

@@ -22,4 +22,4 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Foundation"] }

@@ -25,7 +25,7 @@ pub fn tamanho_ecra() -> (u16, u16) {
 /// acelera o rato, por isso o PC não a consegue calcular a partir do que manda.
 /// Cada arranque do servidor cria um aparelho novo e os antigos ficam na lista com a
 /// última posição, por isso procura-se o número atual ("Device <n>: Mousarchy").
-fn posicao_ponteiro() -> Option<(f32, f32)> {
+pub fn posicao_ponteiro() -> Option<(f32, f32)> {
     let saida = Command::new("dumpsys").arg("input").output().ok()?.stdout;
     let texto = String::from_utf8_lossy(&saida);
     let numero = texto.lines().find_map(|l| {
@@ -44,7 +44,7 @@ fn posicao_ponteiro() -> Option<(f32, f32)> {
 /// movimento no sentido contrário invalida a resposta (a geração muda).
 pub struct Borda {
     /// A borda de saída, um de `mousarchy_protocolo::borda`.
-    lado: u8,
+    pub lado: u8,
     largura: f32,
     altura: f32,
     pub encostado: AtomicBool,

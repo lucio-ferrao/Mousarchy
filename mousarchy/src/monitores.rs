@@ -12,12 +12,20 @@ use wayland_protocols::xdg::xdg_output::zv1::client::{
 struct Estado {
     gestor: Option<ZxdgOutputManagerV1>,
     saidas: Vec<WlOutput>,
-    /// (nome, posição) de cada saída, pela ordem de `saidas`.
-    monitores: Vec<(String, (i32, i32))>,
+    /// Cada saída, pela ordem de `saidas`.
+    monitores: Vec<Monitor>,
 }
 
-/// Nome e posição lógica de cada monitor.
-pub fn monitores() -> Result<Vec<(String, (i32, i32))>, Box<dyn std::error::Error>> {
+/// Um monitor: o nome da saída e a posição e o tamanho lógicos.
+#[derive(Clone, Default)]
+pub struct Monitor {
+    pub nome: String,
+    pub posicao: (i32, i32),
+    pub tamanho: (i32, i32),
+}
+
+/// Os monitores, com o nome e a posição e o tamanho lógicos.
+pub fn monitores() -> Result<Vec<Monitor>, Box<dyn std::error::Error>> {
     let ligacao = Connection::connect_to_env()?;
     let mut fila = ligacao.new_event_queue();
     let qh = fila.handle();
@@ -25,7 +33,7 @@ pub fn monitores() -> Result<Vec<(String, (i32, i32))>, Box<dyn std::error::Erro
     let mut estado = Estado::default();
     fila.roundtrip(&mut estado)?;
     let gestor = estado.gestor.clone().ok_or("o compositor não tem xdg-output")?;
-    estado.monitores = vec![(String::new(), (0, 0)); estado.saidas.len()];
+    estado.monitores = vec![Monitor::default(); estado.saidas.len()];
     for (i, saida) in estado.saidas.iter().enumerate() {
         gestor.get_xdg_output(saida, &qh, i);
     }
@@ -48,8 +56,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Estado {
 impl Dispatch<ZxdgOutputV1, usize> for Estado {
     fn event(e: &mut Self, _: &ZxdgOutputV1, ev: zxdg_output_v1::Event, i: &usize, _: &Connection, _: &QueueHandle<Self>) {
         match ev {
-            zxdg_output_v1::Event::Name { name } => e.monitores[*i].0 = name,
-            zxdg_output_v1::Event::LogicalPosition { x, y } => e.monitores[*i].1 = (x, y),
+            zxdg_output_v1::Event::Name { name } => e.monitores[*i].nome = name,
+            zxdg_output_v1::Event::LogicalPosition { x, y } => e.monitores[*i].posicao = (x, y),
+            zxdg_output_v1::Event::LogicalSize { width, height } => e.monitores[*i].tamanho = (width, height),
             _ => {}
         }
     }

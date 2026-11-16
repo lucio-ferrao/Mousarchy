@@ -405,6 +405,7 @@ async fn do_capture_session(
                 activated = activated.next() => {
                     let activated = activated.ok_or(CaptureError::ActivationClosed)?;
                     log::debug!("activated: {activated:?}");
+                    crate::set_entry_position(activated.cursor_position().map(|(x, y)| (x as f64, y as f64)));
 
                     // get barrier id from activation
                     let barrier_id = match activated.barrier_id() {

@@ -31,7 +31,9 @@ const TELEMOVEL: &[u8] = b"mousarchy telemovel";
 pub mod pc {
     /// Relatório do rato: botões (esquerdo, direito, meio), X e Y de 16 bits, roda e roda horizontal (7 bytes).
     pub const RATO: u8 = 1;
-    /// O rato acabou de entrar: pôr o ponteiro na borda de entrada.
+    /// O rato acabou de entrar: pôr o ponteiro na borda de entrada; com mais 2 bytes (u16 LE), no
+    /// sítio dela por onde saiu do PC (0 no início da borda, 65535 no fim: de cima para baixo numa
+    /// borda lateral, da esquerda para a direita em cima ou em baixo).
     pub const ENTRAR: u8 = 2;
     /// A borda do telemóvel por onde se volta ao PC (um de [`borda`](crate::borda)).
     pub const LADO: u8 = 3;
