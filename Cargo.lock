@@ -1081,6 +1081,7 @@ dependencies = [
  "input-event",
  "log",
  "mousarchy-protocolo",
+ "socket2",
  "tokio",
  "wayland-client",
  "wayland-protocols",
@@ -1093,6 +1094,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "libadb",
+ "libc",
  "mousarchy-protocolo",
  "tokio",
 ]

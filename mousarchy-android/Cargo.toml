@@ -6,6 +6,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 futures = "0.3.34"
+libc = "0.2"
 libadb = { version = "0.9", features = ["pairing", "tokio"] }
 mousarchy-protocolo = { version = "0.1.0", path = "../mousarchy-protocolo" }
 tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util"] }

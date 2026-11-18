@@ -92,6 +92,12 @@ async fn handshake(tcp: &mut TcpStream, chave: &Chave) -> io::Result<TransportSt
 async fn abrir(ip: IpAddr, modo: u8) -> io::Result<TcpStream> {
     let mut tcp = timeout(Duration::from_secs(2), TcpStream::connect((ip, p::PORTA))).await??;
     tcp.set_nodelay(true)?;
+    // um telemóvel que some sem fechar a ligação (servidor morto, fora da rede) é dado como
+    // perdido em cerca de 35 s, e o rato e o teclado voltam ao PC
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(20))
+        .with_interval(Duration::from_secs(5));
+    socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive)?;
     let mut abertura = p::MAGIA.to_vec();
     abertura.push(modo);
     tcp.write_all(&abertura).await?;

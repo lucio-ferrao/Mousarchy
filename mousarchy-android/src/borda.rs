@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use mousarchy_protocolo::borda;
 
-use crate::NOME;
 
 /// Tamanho do ecrã em píxeis, de `wm size` (a última linha ganha: "Override size" se existir).
 pub fn tamanho_ecra() -> (u16, u16) {
@@ -24,12 +23,13 @@ pub fn tamanho_ecra() -> (u16, u16) {
 /// `DeviceId(<n>):[… hoveringPointers=[Pointer(id=0, MOUSE) at (x, y)] …`. O Android
 /// acelera o rato, por isso o PC não a consegue calcular a partir do que manda.
 /// Cada arranque do servidor cria um aparelho novo e os antigos ficam na lista com a
-/// última posição, por isso procura-se o número atual ("Device <n>: Mousarchy").
-pub fn posicao_ponteiro() -> Option<(f32, f32)> {
+/// última posição, por isso procura-se o número atual ("Device <n>: <nome>"); cada PC tem o
+/// seu rato, com o seu [nome].
+pub fn posicao_ponteiro(nome: &str) -> Option<(f32, f32)> {
     let saida = Command::new("dumpsys").arg("input").output().ok()?.stdout;
     let texto = String::from_utf8_lossy(&saida);
     let numero = texto.lines().find_map(|l| {
-        l.trim().strip_prefix("Device ")?.strip_suffix(&format!(": {NOME}"))
+        l.trim().strip_prefix("Device ")?.strip_suffix(&format!(": {nome}"))
     })?;
     let estado = texto.split(&format!("DeviceId({numero}):[")).nth(1)?;
     let estado = estado.split("pilferingPointerIds").next()?;
@@ -45,6 +45,8 @@ pub fn posicao_ponteiro() -> Option<(f32, f32)> {
 pub struct Borda {
     /// A borda de saída, um de `mousarchy_protocolo::borda`.
     pub lado: u8,
+    /// O nome do rato deste PC no Android.
+    nome: String,
     largura: f32,
     altura: f32,
     pub encostado: AtomicBool,
@@ -55,9 +57,10 @@ pub struct Borda {
 
 impl Borda {
     /// Nova vigia para uma sessão; a thread acaba quando a sessão larga a `Borda`.
-    pub fn nova(lado: u8, largura: u16, altura: u16) -> Arc<Borda> {
+    pub fn nova(lado: u8, nome: &str, largura: u16, altura: u16) -> Arc<Borda> {
         let borda = Arc::new(Borda {
             lado,
+            nome: nome.to_owned(),
             largura: largura as f32,
             altura: altura as f32,
             encostado: AtomicBool::new(false),
@@ -130,7 +133,7 @@ impl Borda {
 
     fn ver_posicao(&self) {
         let g = self.geracao.load(Ordering::SeqCst);
-        let encostado = match (posicao_ponteiro(), self.lado) {
+        let encostado = match (posicao_ponteiro(&self.nome), self.lado) {
             (Some((x, _)), borda::ESQUERDA) => x < 1.0,
             (Some((x, _)), borda::DIREITA) => x >= self.largura - 1.0,
             (Some((_, y)), borda::CIMA) => y < 1.0,

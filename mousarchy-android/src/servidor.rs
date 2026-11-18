@@ -1,11 +1,13 @@
 //! O servidor, que corre como `shell`: o rato UHID e a escuta na rede de casa.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,11 +66,50 @@ fn atender(mut ligacao: TcpStream, estado: &Estado) -> io::Result<()> {
             let chave = ler_chave(&caminho_da_chave(&id)).ok_or_else(|| io::Error::other("PC desconhecido"))?;
             let sessao = handshake(&mut ligacao, &chave)?;
             ligacao.set_read_timeout(None)?;
+            manter_viva(&ligacao);
             eprintln!("sessão com {}", ligacao.peer_addr()?);
-            sessao_do_rato(ligacao, sessao)
+            // um PC tem uma sessão: a que ficou de uma ligação anterior dele (o Wi-Fi caiu, o
+            // programa foi reiniciado) fecha-se, e os aparelhos dela vão com ela
+            let geracao = GERACAO.fetch_add(1, Ordering::SeqCst);
+            if let Some((_, antiga)) = SESSOES.lock().unwrap().insert(id, (geracao, ligacao.try_clone()?)) {
+                eprintln!("sessão anterior do mesmo PC fechada");
+                let _ = antiga.shutdown(Shutdown::Both);
+            }
+            let resultado = sessao_do_rato(ligacao, sessao, &nome_do_pc(&id));
+            let mut sessoes = SESSOES.lock().unwrap();
+            if sessoes.get(&id).is_some_and(|(g, _)| *g == geracao) {
+                sessoes.remove(&id);
+            }
+            resultado
         }
         m => Err(io::Error::other(format!("modo desconhecido {m}"))),
     }
+}
+
+/// As sessões abertas, pelo id da chave do PC, com a geração de cada uma.
+static SESSOES: Mutex<BTreeMap<[u8; 8], (u64, TcpStream)>> = Mutex::new(BTreeMap::new());
+static GERACAO: AtomicU64 = AtomicU64::new(0);
+
+/// O nome dos aparelhos de um PC no Android ("Mousarchy 3f2a"): cada PC tem os seus, e a borda
+/// segue o rato do seu.
+fn nome_do_pc(id: &[u8; 8]) -> String {
+    format!("{NOME} {:02x}{:02x}", id[0], id[1])
+}
+
+/// Keepalive de TCP: uma ligação de um PC que desapareceu sem a fechar cai em cerca de 35 s, em
+/// vez de ficar aberta com os aparelhos dela.
+fn manter_viva(ligacao: &TcpStream) {
+    let fd = ligacao.as_raw_fd();
+    let opcao = |nivel, nome, valor: libc::c_int| {
+        // SAFETY: setsockopt lê um int do tamanho que lhe é dado
+        unsafe {
+            libc::setsockopt(fd, nivel, nome, (&raw const valor).cast(), size_of::<libc::c_int>() as libc::socklen_t);
+        }
+    };
+    opcao(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+    opcao(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 20);
+    opcao(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 5);
+    opcao(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3);
 }
 
 /// O ganho do Android para um movimento do rato isolado, sem aceleração (píxeis por unidade).
@@ -77,12 +118,12 @@ const GANHO_BASE: f32 = 3.06;
 /// Leva o ponteiro, já encostado à borda [lado], até à [fracao] dela: o Android acelera o rato,
 /// por isso move-se aos poucos, vendo onde ficou (`dumpsys input`) e corrigindo, com pausas para o
 /// movimento seguinte não contar como rápido.
-fn ao_longo_da_borda(rato: &mut Uhid, lado: u8, fracao: f32, (w, h): (u16, u16)) -> io::Result<()> {
+fn ao_longo_da_borda(rato: &mut Uhid, nome: &str, lado: u8, fracao: f32, (w, h): (u16, u16)) -> io::Result<()> {
     let lateral = matches!(lado, p::borda::ESQUERDA | p::borda::DIREITA);
     let alvo = fracao * f32::from(if lateral { h } else { w });
     for _ in 0..3 {
         std::thread::sleep(Duration::from_millis(80));
-        let Some((x, y)) = posicao_ponteiro() else { return Ok(()) };
+        let Some((x, y)) = posicao_ponteiro(nome) else { return Ok(()) };
         let falta = alvo - if lateral { y } else { x };
         if falta.abs() < 4.0 {
             break;
@@ -186,7 +227,7 @@ fn scroll_invertido_no_android() -> bool {
     saida.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
 }
 
-fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Result<()> {
+fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, nome: &str) -> io::Result<()> {
     let (w, h) = tamanho_ecra();
     let mut ola = vec![p::telemovel::OLA];
     ola.extend_from_slice(&w.to_le_bytes());
@@ -200,9 +241,9 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Res
     // borda faria o Android recriar as janelas das apps). Com ele ligado, o Android esconderia o
     // teclado do ecrã (o Keyarchy, e com ele o ecrã inicial), por isso mostra-o na mesma.
     let _ = std::process::Command::new("settings").args(["put", "secure", "show_ime_with_hard_keyboard", "1"]).status();
-    let nome_do_teclado = format!("{NOME} teclado");
+    let nome_do_teclado = format!("{nome} teclado");
     let mut teclado = Uhid::criar(&nome_do_teclado, 0x7a02, DESCRITOR_TECLADO)?;
-    let mut navegacao = Uhid::criar(&format!("{NOME} navegação"), 0x7a03, DESCRITOR_NAVEGACAO)?;
+    let mut navegacao = Uhid::criar(&format!("{nome} navegação"), 0x7a03, DESCRITOR_NAVEGACAO)?;
     let mut borda: Option<Arc<Borda>> = None;
     // O rato só existe enquanto está no telemóvel: ao largá-lo, o Android tira logo o ponteiro
     // do ecrã (sem rato, esperaria uns segundos de inatividade).
@@ -213,7 +254,7 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Res
             Err(e) => break Err(e),
         };
         match (msg.first().copied(), &borda) {
-            (Some(p::pc::LADO), _) if msg.len() == 2 => borda = Some(Borda::nova(msg[1], w, h)),
+            (Some(p::pc::LADO), _) if msg.len() == 2 => borda = Some(Borda::nova(msg[1], nome, w, h)),
             (Some(p::pc::RATO), Some(b)) if msg.len() == 1 + RELATORIO_RATO => {
                 let mut relatorio = msg[1..].to_vec();
                 if inverte_scroll {
@@ -245,7 +286,7 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Res
             (Some(p::pc::TECLADO), _) if msg.len() == 1 + RELATORIO_TECLADO => teclado.enviar(&msg[1..])?,
             (Some(p::pc::NAVEGACAO), _) if msg.len() == 2 => navegacao.enviar(&msg[1..])?,
             (Some(p::pc::ENTRAR), Some(b)) => {
-                let mut novo = Uhid::criar(NOME, 0x7a01, DESCRITOR_RATO)?;
+                let mut novo = Uhid::criar(nome, 0x7a01, DESCRITOR_RATO)?;
                 novo.esperar_aberto(Duration::from_millis(500));
                 let (dx, dy) = b.encostar();
                 let mut r = [0u8; RELATORIO_RATO];
@@ -254,7 +295,7 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState) -> io::Res
                 novo.enviar(&r)?;
                 if msg.len() == 3 {
                     let fracao = f32::from(u16::from_le_bytes([msg[1], msg[2]])) / f32::from(u16::MAX);
-                    ao_longo_da_borda(&mut novo, b.lado, fracao, (w, h))?;
+                    ao_longo_da_borda(&mut novo, nome, b.lado, fracao, (w, h))?;
                 }
                 rato = Some(novo);
                 b.afastou();

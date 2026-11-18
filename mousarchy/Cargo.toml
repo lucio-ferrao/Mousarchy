@@ -12,6 +12,7 @@ if-addrs = "0.15.0"
 input-capture = { version = "0.4", default-features = false }
 input-event = "0.4"
 log = "0.4.35"
+socket2 = { version = "0.6", features = ["all"] }
 mousarchy-protocolo = { version = "0.1.0", path = "../mousarchy-protocolo" }
 tokio = { version = "1.54.1", features = ["full"] }
 
