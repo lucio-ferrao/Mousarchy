@@ -14,6 +14,25 @@ pub fn fracao_na_borda(lado: Position) -> Option<f64> {
     fracao.is_finite().then(|| fracao.clamp(0.0, 1.0))
 }
 
+/// O ponto da borda [lado] do monitor por onde o rato saiu à [fracao] dela, para o cursor voltar
+/// do telemóvel no mesmo sítio da borda dele.
+pub fn ponto_na_borda(lado: Position, fracao: f64) -> Option<(f64, f64)> {
+    let (x, y, esquerda, cima, largura, altura) = posicao_e_monitor()?;
+    Some(match lado {
+        Position::Left | Position::Right => (x, cima + fracao * (altura - 1.0)),
+        Position::Top | Position::Bottom => (esquerda + fracao * (largura - 1.0), y),
+    })
+}
+
+/// Põe o cursor do Windows em [ponto], depois de largar a captura (enquanto ela dura, os movimentos
+/// contam a partir do ponto de entrada).
+#[cfg(windows)]
+pub fn por_cursor((x, y): (f64, f64)) {
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    // SAFETY: só muda a posição do cursor
+    let _ = unsafe { SetCursorPos(x.round() as i32, y.round() as i32) };
+}
+
 /// O ponto de saída e o monitor dele (esquerda, cima, largura, altura).
 #[cfg(windows)]
 fn posicao_e_monitor() -> Option<(f64, f64, f64, f64, f64, f64)> {

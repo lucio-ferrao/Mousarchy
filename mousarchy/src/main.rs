@@ -134,7 +134,9 @@ impl Envio {
     }
 }
 
-async fn largar(captura: &mut InputCapture, envio: &mut Envio, rato: &mut Rato, teclado: &mut teclado::Teclado) {
+/// Devolve o rato ao PC; com [ponto], o cursor volta aí (o sítio da borda por onde saiu do telemóvel).
+async fn largar(captura: &mut InputCapture, envio: &mut Envio, rato: &mut Rato, teclado: &mut teclado::Teclado,
+                ponto: Option<(f64, f64)>) {
     if rato.botoes != 0 {
         rato.botoes = 0;
         let _ = envio.mandar(&rato.relatorio(0, 0, 0, 0)).await;
@@ -145,8 +147,14 @@ async fn largar(captura: &mut InputCapture, envio: &mut Envio, rato: &mut Rato, 
     }
     let _ = envio.mandar(&teclado.largar()).await;
     cursor::mostrar();
+    #[cfg(target_os = "linux")]
+    input_capture::set_release_position(ponto);
     if let Err(e) = captura.release().await {
         log::warn!("não larguei a captura: {e}");
+    }
+    #[cfg(windows)]
+    if let Some(ponto) = ponto {
+        entrada::por_cursor(ponto);
     }
 }
 
@@ -278,7 +286,7 @@ async fn sessao_do_rato(
                         if captura.keys_pressed(&SOLTAR) {
                             dentro = false;
                             log::info!("rato de volta ao PC (teclas)");
-                            largar(captura, &mut envio, &mut rato, &mut teclado).await;
+                            largar(captura, &mut envio, &mut rato, &mut teclado, None).await;
                             Ok(())
                         } else if let Some(r) = teclado.tecla(key, state != 0).filter(|_| dentro) {
                             envio.mandar(&r).await
@@ -293,10 +301,12 @@ async fn sessao_do_rato(
             t = recebidas.recv() => {
                 let Some(t) = t else { break Err("o telemóvel fechou a ligação".into()) };
                 match p::decifrar(&mut envio.sessao, &t) {
-                    Ok(m) if m == [p::telemovel::SAIU] && dentro => {
+                    Ok(m) if m.first() == Some(&p::telemovel::SAIU) && dentro => {
                         dentro = false;
                         log::info!("rato de volta ao PC (borda)");
-                        largar(captura, &mut envio, &mut rato, &mut teclado).await;
+                        let ponto = (m.len() == 3).then(|| f64::from(u16::from_le_bytes([m[1], m[2]])) / f64::from(u16::MAX))
+                            .and_then(|fracao| entrada::ponto_na_borda(lado, fracao));
+                        largar(captura, &mut envio, &mut rato, &mut teclado, ponto).await;
                     }
                     Ok(_) => {}
                     Err(e) => break Err(e.into()),

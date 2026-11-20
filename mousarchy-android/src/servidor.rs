@@ -9,12 +9,12 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mousarchy_protocolo::{self as p, Chave, TransportState};
 
 use crate::NOME;
-use crate::borda::{Borda, posicao_ponteiro, tamanho_ecra};
+use crate::borda::{Borda, no_android, tamanho_ecra};
 use crate::rato::{DESCRITOR_NAVEGACAO, DESCRITOR_RATO, DESCRITOR_TECLADO, RELATORIO_RATO, RELATORIO_TECLADO, Uhid};
 
 /// As chaves dos PCs emparelhados, uma por ficheiro com o nome do seu id.
@@ -96,6 +96,18 @@ fn nome_do_pc(id: &[u8; 8]) -> String {
     format!("{NOME} {:02x}{:02x}", id[0], id[1])
 }
 
+/// A pausa depois dos movimentos que põem o ponteiro na borda, para o Android não juntar a
+/// velocidade deles à dos primeiros movimentos do rato.
+const PAUSA_DEPOIS_DE_ENTRAR: Duration = Duration::from_millis(50);
+
+/// Quantos bytes a [ligacao] já recebeu e ainda não foram lidos.
+fn bytes_em_espera(ligacao: &TcpStream) -> usize {
+    let mut n: libc::c_int = 0;
+    // SAFETY: FIONREAD escreve um int no endereço dado
+    let r = unsafe { libc::ioctl(ligacao.as_raw_fd(), libc::FIONREAD, &raw mut n) };
+    if r == 0 { n.max(0) as usize } else { 0 }
+}
+
 /// Keepalive de TCP: uma ligação de um PC que desapareceu sem a fechar cai em cerca de 35 s, em
 /// vez de ficar aberta com os aparelhos dela.
 fn manter_viva(ligacao: &TcpStream) {
@@ -115,26 +127,24 @@ fn manter_viva(ligacao: &TcpStream) {
 /// O ganho do Android para um movimento do rato isolado, sem aceleração (píxeis por unidade).
 const GANHO_BASE: f32 = 3.06;
 
-/// Leva o ponteiro, já encostado à borda [lado], até à [fracao] dela: o Android acelera o rato,
-/// por isso move-se aos poucos, vendo onde ficou (`dumpsys input`) e corrigindo, com pausas para o
-/// movimento seguinte não contar como rápido.
-fn ao_longo_da_borda(rato: &mut Uhid, nome: &str, lado: u8, fracao: f32, (w, h): (u16, u16)) -> io::Result<()> {
+/// O tempo que o Android pode levar a juntar um rato novo (medido: ~110 ms): até lá perde os
+/// movimentos dele.
+const RATO_NOVO: Duration = Duration::from_millis(1000);
+
+/// Espera que o Android junte o rato [nome], até [RATO_NOVO].
+fn esperar_no_android(nome: &str) {
+    let limite = Instant::now() + RATO_NOVO;
+    while !no_android(nome) && Instant::now() < limite {}
+}
+
+/// Um movimento só no eixo ao longo da borda [lado] até à [fracao] dela, para um rato novo: o
+/// ponteiro dele começa no meio do ecrã e o primeiro movimento, isolado, tem o ganho base (sem a
+/// aceleração do Android).
+fn ao_longo_da_borda(lado: u8, fracao: f32, (w, h): (u16, u16)) -> (i16, i16) {
     let lateral = matches!(lado, p::borda::ESQUERDA | p::borda::DIREITA);
-    let alvo = fracao * f32::from(if lateral { h } else { w });
-    for _ in 0..3 {
-        std::thread::sleep(Duration::from_millis(80));
-        let Some((x, y)) = posicao_ponteiro(nome) else { return Ok(()) };
-        let falta = alvo - if lateral { y } else { x };
-        if falta.abs() < 4.0 {
-            break;
-        }
-        let unidades = (falta / GANHO_BASE).round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-        let mut r = [0u8; RELATORIO_RATO];
-        let campo = if lateral { 3..5 } else { 1..3 };
-        r[campo].copy_from_slice(&unidades.to_le_bytes());
-        rato.enviar(&r)?;
-    }
-    Ok(())
+    let tamanho = f32::from(if lateral { h } else { w });
+    let unidades = ((fracao - 0.5) * tamanho / GANHO_BASE).round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+    if lateral { (0, unidades) } else { (unidades, 0) }
 }
 
 /// SPAKE2 com o código e confirmação pelo handshake; se passar, a chave fica guardada.
@@ -248,8 +258,17 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, nome: &str
     // O rato só existe enquanto está no telemóvel: ao largá-lo, o Android tira logo o ponteiro
     // do ecrã (sem rato, esperaria uns segundos de inatividade).
     let mut rato: Option<Uhid> = None;
+    // Os bytes que já esperavam quando o ponteiro acabou de entrar: os movimentos neles chegaram
+    // enquanto a entrada se preparava e, passados de rajada, o Android acelerava-os.
+    let mut em_fila = 0usize;
     let resultado = loop {
-        let msg = match p::ler_trama(&mut ligacao).and_then(|t| p::decifrar(&mut sessao, &t)) {
+        let trama = match p::ler_trama(&mut ligacao) {
+            Ok(t) => t,
+            Err(e) => break Err(e),
+        };
+        let atrasada = em_fila > 0;
+        em_fila = em_fila.saturating_sub(2 + trama.len());
+        let msg = match p::decifrar(&mut sessao, &trama) {
             Ok(m) => m,
             Err(e) => break Err(e),
         };
@@ -257,6 +276,10 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, nome: &str
             (Some(p::pc::LADO), _) if msg.len() == 2 => borda = Some(Borda::nova(msg[1], nome, w, h)),
             (Some(p::pc::RATO), Some(b)) if msg.len() == 1 + RELATORIO_RATO => {
                 let mut relatorio = msg[1..].to_vec();
+                // de uma entrada que se preparava: sem o movimento, só os botões e o scroll
+                if atrasada {
+                    relatorio[1..5].fill(0);
+                }
                 if inverte_scroll {
                     relatorio[5] = (relatorio[5] as i8).saturating_neg() as u8;
                 }
@@ -265,7 +288,10 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, nome: &str
                 let para_a_borda = b.para_a_borda(dx, dy);
                 if para_a_borda && relatorio[0] == 0 && b.encostado.load(Ordering::SeqCst) {
                     b.afastou();
-                    p::escrever_trama(&mut ligacao, &p::cifrar(&mut sessao, &[p::telemovel::SAIU])?)?;
+                    // por onde saiu, para o cursor do PC voltar no mesmo sítio da borda
+                    let mut saiu = vec![p::telemovel::SAIU];
+                    saiu.extend_from_slice(&(b.fracao.load(Ordering::SeqCst) as u16).to_le_bytes());
+                    p::escrever_trama(&mut ligacao, &p::cifrar(&mut sessao, &saiu)?)?;
                     rato = None;
                     continue;
                 }
@@ -288,15 +314,23 @@ fn sessao_do_rato(mut ligacao: TcpStream, mut sessao: TransportState, nome: &str
             (Some(p::pc::ENTRAR), Some(b)) => {
                 let mut novo = Uhid::criar(nome, 0x7a01, DESCRITOR_RATO)?;
                 novo.esperar_aberto(Duration::from_millis(500));
-                let (dx, dy) = b.encostar();
-                let mut r = [0u8; RELATORIO_RATO];
-                r[1..3].copy_from_slice(&dx.to_le_bytes());
-                r[3..5].copy_from_slice(&dy.to_le_bytes());
-                novo.enviar(&r)?;
+                esperar_no_android(nome);
+                // primeiro ao longo da borda (isolado, sem aceleração), depois encostado a ela
+                let mut movimentos = Vec::new();
                 if msg.len() == 3 {
                     let fracao = f32::from(u16::from_le_bytes([msg[1], msg[2]])) / f32::from(u16::MAX);
-                    ao_longo_da_borda(&mut novo, nome, b.lado, fracao, (w, h))?;
+                    movimentos.push(ao_longo_da_borda(b.lado, fracao, (w, h)));
                 }
+                movimentos.push(b.encostar());
+                for (dx, dy) in movimentos {
+                    let mut r = [0u8; RELATORIO_RATO];
+                    r[1..3].copy_from_slice(&dx.to_le_bytes());
+                    r[3..5].copy_from_slice(&dy.to_le_bytes());
+                    novo.enviar(&r)?;
+                }
+                // o Android esquece a velocidade destes saltos ao fim de ~40 ms sem movimento
+                std::thread::sleep(PAUSA_DEPOIS_DE_ENTRAR);
+                em_fila = bytes_em_espera(&ligacao);
                 rato = Some(novo);
                 b.afastou();
             }

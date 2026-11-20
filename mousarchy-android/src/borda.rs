@@ -1,7 +1,7 @@
 //! Onde está o ponteiro do Android, para saber quando o rato volta ao PC.
 
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
@@ -17,6 +17,14 @@ pub fn tamanho_ecra() -> (u16, u16) {
         .filter_map(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
         .last()
         .unwrap_or((0, 0))
+}
+
+/// Se o Android já juntou o aparelho [nome] (`dumpsys input`: "Device <n>: <nome>").
+pub fn no_android(nome: &str) -> bool {
+    let Ok(saida) = Command::new("dumpsys").arg("input").output() else { return false };
+    String::from_utf8_lossy(&saida.stdout).lines().any(|l| {
+        l.trim().strip_prefix("Device ").and_then(|l| l.strip_suffix(&format!(": {nome}"))).is_some()
+    })
 }
 
 /// Posição real do ponteiro, que o `dumpsys input` mostra como
@@ -50,6 +58,9 @@ pub struct Borda {
     largura: f32,
     altura: f32,
     pub encostado: AtomicBool,
+    /// Onde o ponteiro estava encostado, como fração da borda (0 no início, [u16::MAX] no fim),
+    /// para o cursor do PC voltar no mesmo sítio da borda dele.
+    pub fracao: AtomicU32,
     geracao: AtomicU64,
     pedido: Mutex<bool>,
     acorda: Condvar,
@@ -64,6 +75,7 @@ impl Borda {
             largura: largura as f32,
             altura: altura as f32,
             encostado: AtomicBool::new(false),
+            fracao: AtomicU32::new(u32::from(u16::MAX / 2)),
             geracao: AtomicU64::new(0),
             pedido: Mutex::new(false),
             acorda: Condvar::new(),
@@ -133,7 +145,8 @@ impl Borda {
 
     fn ver_posicao(&self) {
         let g = self.geracao.load(Ordering::SeqCst);
-        let encostado = match (posicao_ponteiro(&self.nome), self.lado) {
+        let posicao = posicao_ponteiro(&self.nome);
+        let encostado = match (posicao, self.lado) {
             (Some((x, _)), borda::ESQUERDA) => x < 1.0,
             (Some((x, _)), borda::DIREITA) => x >= self.largura - 1.0,
             (Some((_, y)), borda::CIMA) => y < 1.0,
@@ -141,6 +154,14 @@ impl Borda {
             (None, _) => false,
         };
         if self.geracao.load(Ordering::SeqCst) == g {
+            if let (true, Some((x, y))) = (encostado, posicao) {
+                let fracao = match self.lado {
+                    borda::ESQUERDA | borda::DIREITA => y / self.altura,
+                    _ => x / self.largura,
+                };
+                let fracao = (fracao.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u32;
+                self.fracao.store(fracao, Ordering::SeqCst);
+            }
             self.encostado.store(encostado, Ordering::SeqCst);
         }
     }

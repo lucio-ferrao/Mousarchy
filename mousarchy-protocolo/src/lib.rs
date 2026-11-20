@@ -57,7 +57,8 @@ pub mod borda {
 pub mod telemovel {
     /// Largura e altura do ecrã, 2 bytes cada (little endian).
     pub const OLA: u8 = 1;
-    /// O ponteiro encostou à borda de saída e continuou: o rato volta ao PC.
+    /// O ponteiro encostou à borda de saída e continuou: o rato volta ao PC; com mais 2 bytes (u16
+    /// LE), o sítio dessa borda por onde saiu (como no [`ENTRAR`](crate::pc::ENTRAR)).
     pub const SAIU: u8 = 2;
     /// Emparelhamento aceite.
     pub const EMPARELHADO: u8 = 3;

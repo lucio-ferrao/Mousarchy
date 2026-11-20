@@ -487,6 +487,8 @@ async fn release_capture(
         .cursor_position()
         .expect("compositor did not report cursor position!");
     log::debug!("client entered @ ({x}, {y})");
+    // Mousarchy: back where the pointer left the other screen, if told
+    let (x, y) = crate::take_release_position().unwrap_or((x as f64, y as f64));
     let (dx, dy) = match current_pos {
         // offset cursor position to not enter again immediately
         Position::Left => (1., 0.),
@@ -495,7 +497,7 @@ async fn release_capture(
         Position::Bottom => (0., -1.),
     };
     // release 1px to the right of the entered zone
-    let cursor_position = (x as f64 + dx, y as f64 + dy);
+    let cursor_position = (x + dx, y + dy);
     let release_options = ReleaseOptions::default()
         .set_activation_id(activated.activation_id())
         .set_cursor_position(Some(cursor_position));

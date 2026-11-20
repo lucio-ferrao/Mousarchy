@@ -30,6 +30,20 @@ pub fn entry_position() -> Option<(f64, f64)> {
     *ENTRY_POSITION.lock().unwrap()
 }
 
+/// Mousarchy: where the next release puts the pointer, in the compositor's logical coordinates,
+/// instead of where it entered (libei only: the portal takes it with the release).
+static RELEASE_POSITION: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// Puts the pointer at (`x`, `y`) on the next release (see [`RELEASE_POSITION`]); call it before releasing.
+pub fn set_release_position(position: Option<(f64, f64)>) {
+    *RELEASE_POSITION.lock().unwrap() = position;
+}
+
+#[allow(dead_code)] // taken by the libei backend only
+fn take_release_position() -> Option<(f64, f64)> {
+    RELEASE_POSITION.lock().unwrap().take()
+}
+
 #[allow(dead_code)] // set by the libei backend only
 fn set_entry_position(position: Option<(f64, f64)>) {
     *ENTRY_POSITION.lock().unwrap() = position;
